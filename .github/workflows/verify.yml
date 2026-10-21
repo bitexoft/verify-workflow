@@ -1,0 +1,113 @@
+# Reusable workflow: the official side of verification.
+#
+# Learners do not copy this into their repository: they CALL it. That way the measuring
+# stick is fixed in one place, and the CLI version is pinned here so a delivery is never
+# "unapproved" just because we published a new version.
+#
+# In their repository:
+#
+#   jobs:
+#     verify:
+#       uses: bitexoft/verify-workflow/.github/workflows/verify.yml@v1
+#       with:
+#         delivery: A1
+
+name: Bitexoft verification
+
+on:
+  workflow_call:
+    inputs:
+      delivery:
+        description: Which delivery to verify (earlier ones are verified too)
+        required: true
+        type: string
+      python-version:
+        description: Python version
+        required: false
+        type: string
+        default: "3.12"
+      cli-version:
+        description: Pinned bitexoft-verify version
+        required: false
+        type: string
+        default: "0.2.*"
+      extras:
+        description: CLI extras to install
+        required: false
+        type: string
+        default: "api"
+    outputs:
+      status:
+        description: pass or fail
+        value: ${{ jobs.verify.outputs.status }}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      status: ${{ steps.run.outputs.status }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history is needed: later deliveries compare against earlier tags, and
+          # without them those checks skip instead of running.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+
+      - name: Install the project's dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f pyproject.toml ]; then pip install -e ".[dev]" || pip install -e . || true; fi
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+
+      - name: Install the verifier, pinned
+        run: pip install "bitexoft-verify[${{ inputs.extras }}]==${{ inputs.cli-version }}"
+
+      - name: Verify the delivery
+        id: run
+        run: |
+          set +e
+          bitexoft-verify check "${{ inputs.delivery }}" --surface ci --out verify-report.json
+          code=$?
+          set -e
+          if [ "$code" = "0" ]; then echo "status=pass" >> "$GITHUB_OUTPUT"; else echo "status=fail" >> "$GITHUB_OUTPUT"; fi
+          exit $code
+
+      - name: Readable summary
+        if: always()
+        run: |
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, pathlib
+          path = pathlib.Path("verify-report.json")
+          if not path.is_file():
+              print("## No report was produced\n\nVerification never got to run.")
+              raise SystemExit(0)
+          report = json.loads(path.read_text(encoding="utf-8"))
+          summary = report["summary"]
+          icon = "✅" if summary["status"] == "pass" else "❌"
+          print(f"## {icon} Delivery {report['delivery']} — {summary['passed']} green, "
+                f"{summary['failed']} red, {summary['skipped']} not checked\n")
+          for gate in report["gates"]:
+              print(f"### {gate['id']}\n")
+              print("| | Check | Detail |")
+              print("|---|---|---|")
+              for check in gate["checks"]:
+                  mark = {"pass": "✅", "fail": "❌", "skip": "⏭️"}[check["status"]]
+                  print(f"| {mark} | {check['title']} | {check.get('message', '')} |")
+              print()
+          print("The full report is in this run's artifacts. Import it into the platform to mark")
+          print("the delivery as verified.")
+          PY
+
+      - name: Keep the report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-report-${{ inputs.delivery }}
+          path: verify-report.json
+          retention-days: 90

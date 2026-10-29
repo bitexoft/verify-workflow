@@ -30,7 +30,7 @@ on:
         description: Pinned bitexoft-verify version
         required: false
         type: string
-        default: "0.2.*"
+        default: "0.3.*"
       extras:
         description: CLI extras to install
         required: false
